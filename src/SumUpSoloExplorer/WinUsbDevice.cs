@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using System.Text;
 using Microsoft.Win32;
 using Microsoft.Win32.SafeHandles;
 
@@ -9,14 +10,19 @@ internal sealed class WinUsbDevice : IDisposable
 {
     private const uint DigcfPresent = 0x00000002;
     private const uint DigcfDeviceInterface = 0x00000010;
+
     private const uint GenericRead = 0x80000000;
     private const uint GenericWrite = 0x40000000;
     private const uint FileShareRead = 0x00000001;
     private const uint FileShareWrite = 0x00000002;
     private const uint OpenExisting = 3;
     private const uint FileAttributeNormal = 0x00000080;
+    private const uint FileFlagOverlapped = 0x40000000;
+
     private const int ErrorNoMoreItems = 259;
     private const int ErrorInsufficientBuffer = 122;
+    private const int ErrorSemTimeout = 121;
+
     private const uint PipeTransferTimeout = 3;
 
     private static readonly Guid GuidDevInterfaceUsbDevice =
@@ -26,6 +32,7 @@ internal sealed class WinUsbDevice : IDisposable
     private IntPtr _winUsbHandle;
 
     public string DevicePath { get; }
+    public Guid InterfaceGuid { get; }
     public byte InterfaceNumber { get; }
     public IReadOnlyList<UsbPipeInfo> Pipes { get; }
     public byte? BulkOutPipe { get; }
@@ -33,108 +40,168 @@ internal sealed class WinUsbDevice : IDisposable
 
     private WinUsbDevice(
         string devicePath,
+        Guid interfaceGuid,
         SafeFileHandle file,
         IntPtr winUsbHandle,
         byte interfaceNumber,
         List<UsbPipeInfo> pipes)
     {
         DevicePath = devicePath;
+        InterfaceGuid = interfaceGuid;
         _file = file;
         _winUsbHandle = winUsbHandle;
         InterfaceNumber = interfaceNumber;
         Pipes = pipes;
 
         BulkOutPipe = pipes
-            .FirstOrDefault(p => p.PipeType == UsbdPipeType.Bulk && (p.PipeId & 0x80) == 0)
+            .FirstOrDefault(p =>
+                p.PipeType == UsbdPipeType.Bulk &&
+                (p.PipeId & 0x80) == 0)
             ?.PipeId;
 
         BulkInPipe = pipes
-            .FirstOrDefault(p => p.PipeType == UsbdPipeType.Bulk && (p.PipeId & 0x80) != 0)
+            .FirstOrDefault(p =>
+                p.PipeType == UsbdPipeType.Bulk &&
+                (p.PipeId & 0x80) != 0)
             ?.PipeId;
     }
 
     public static WinUsbDevice OpenSolo()
     {
-        string? path = EnumerateCandidatePaths()
-            .FirstOrDefault(IsSoloInterfaceOne);
+        var diagnostics = new StringBuilder();
+        var candidates = EnumerateCandidatePaths()
+            .Where(c => IsSoloInterfaceOne(c.Path))
+            .DistinctBy(c => c.Path, StringComparer.OrdinalIgnoreCase)
+            .ToList();
 
-        if (path is null)
+        diagnostics.AppendLine("Diagnostika WinUSB:");
+        diagnostics.AppendLine($"Nalezených cest pro VID_345B/PID_0002/MI_01: {candidates.Count}");
+        diagnostics.AppendLine();
+
+        if (candidates.Count == 0)
         {
             throw new InvalidOperationException(
-                "Solo MI_01 nebylo nalezeno. WinUSB je zřejmě nainstalovaný, " +
-                "ale Windows nezveřejnil očekávanou device interface cestu.");
+                diagnostics +
+                "Nebyla nalezena žádná device interface cesta pro Solo MI_01.");
         }
 
-        SafeFileHandle file = CreateFile(
-            path,
-            GenericRead | GenericWrite,
-            FileShareRead | FileShareWrite,
-            IntPtr.Zero,
-            OpenExisting,
-            FileAttributeNormal,
-            IntPtr.Zero);
-
-        if (file.IsInvalid)
+        foreach (DeviceCandidate candidate in candidates)
         {
-            throw new Win32Exception(
-                Marshal.GetLastWin32Error(),
-                $"CreateFile pro Solo selhalo. Device path: {path}");
-        }
+            diagnostics.AppendLine("----------------------------------------");
+            diagnostics.AppendLine($"GUID: {candidate.InterfaceGuid:B}");
+            diagnostics.AppendLine($"Path: {candidate.Path}");
 
-        if (!WinUsb_Initialize(file, out IntPtr winUsbHandle))
-        {
-            int error = Marshal.GetLastWin32Error();
-            file.Dispose();
-            throw new Win32Exception(error, "WinUsb_Initialize selhalo.");
-        }
+            SafeFileHandle file = CreateFile(
+                candidate.Path,
+                GenericRead | GenericWrite,
+                FileShareRead | FileShareWrite,
+                IntPtr.Zero,
+                OpenExisting,
+                FileAttributeNormal | FileFlagOverlapped,
+                IntPtr.Zero);
 
-        try
-        {
-            if (!WinUsb_QueryInterfaceSettings(
-                    winUsbHandle,
-                    0,
-                    out UsbInterfaceDescriptor descriptor))
+            if (file.IsInvalid)
             {
-                throw new Win32Exception(
-                    Marshal.GetLastWin32Error(),
-                    "Nelze načíst USB interface descriptor.");
+                int error = Marshal.GetLastWin32Error();
+                diagnostics.AppendLine(
+                    $"CreateFile: FAILED ({error}) {new Win32Exception(error).Message}");
+                file.Dispose();
+                continue;
             }
 
-            var pipes = new List<UsbPipeInfo>();
+            diagnostics.AppendLine("CreateFile: OK");
 
-            for (byte i = 0; i < descriptor.bNumEndpoints; i++)
+            if (!WinUsb_Initialize(file, out IntPtr winUsbHandle))
             {
-                if (!WinUsb_QueryPipe(
+                int error = Marshal.GetLastWin32Error();
+                diagnostics.AppendLine(
+                    $"WinUsb_Initialize: FAILED ({error}) {new Win32Exception(error).Message}");
+                file.Dispose();
+                continue;
+            }
+
+            diagnostics.AppendLine("WinUsb_Initialize: OK");
+
+            try
+            {
+                if (!WinUsb_QueryInterfaceSettings(
                         winUsbHandle,
                         0,
-                        i,
-                        out WinUsbPipeInformation info))
+                        out UsbInterfaceDescriptor descriptor))
                 {
-                    throw new Win32Exception(
-                        Marshal.GetLastWin32Error(),
-                        $"Nelze načíst endpoint {i}.");
+                    int error = Marshal.GetLastWin32Error();
+                    diagnostics.AppendLine(
+                        $"WinUsb_QueryInterfaceSettings: FAILED ({error}) " +
+                        new Win32Exception(error).Message);
+
+                    WinUsb_Free(winUsbHandle);
+                    file.Dispose();
+                    continue;
                 }
 
-                pipes.Add(new UsbPipeInfo(
-                    info.PipeType,
-                    info.PipeId,
-                    info.MaximumPacketSize,
-                    info.Interval));
-            }
+                diagnostics.AppendLine(
+                    $"Interface: {descriptor.bInterfaceNumber}, endpointů: {descriptor.bNumEndpoints}");
 
-            return new WinUsbDevice(
-                path,
-                file,
-                winUsbHandle,
-                descriptor.bInterfaceNumber,
-                pipes);
+                var pipes = new List<UsbPipeInfo>();
+                bool pipeFailure = false;
+
+                for (byte index = 0; index < descriptor.bNumEndpoints; index++)
+                {
+                    if (!WinUsb_QueryPipe(
+                            winUsbHandle,
+                            0,
+                            index,
+                            out WinUsbPipeInformation info))
+                    {
+                        int error = Marshal.GetLastWin32Error();
+                        diagnostics.AppendLine(
+                            $"WinUsb_QueryPipe[{index}]: FAILED ({error}) " +
+                            new Win32Exception(error).Message);
+                        pipeFailure = true;
+                        break;
+                    }
+
+                    var pipe = new UsbPipeInfo(
+                        info.PipeType,
+                        info.PipeId,
+                        info.MaximumPacketSize,
+                        info.Interval);
+
+                    pipes.Add(pipe);
+                    diagnostics.AppendLine(
+                        $"Endpoint {index}: 0x{pipe.PipeId:X2}, " +
+                        $"{pipe.PipeType}, MaxPacket={pipe.MaximumPacketSize}");
+                }
+
+                if (pipeFailure)
+                {
+                    WinUsb_Free(winUsbHandle);
+                    file.Dispose();
+                    continue;
+                }
+
+                diagnostics.AppendLine("Vybraná cesta: OK");
+
+                return new WinUsbDevice(
+                    candidate.Path,
+                    candidate.InterfaceGuid,
+                    file,
+                    winUsbHandle,
+                    descriptor.bInterfaceNumber,
+                    pipes);
+            }
+            catch
+            {
+                WinUsb_Free(winUsbHandle);
+                file.Dispose();
+                throw;
+            }
         }
-        catch
-        {
-            WinUsb_Free(winUsbHandle);
-            file.Dispose();
-            throw;
-        }
+
+        throw new InvalidOperationException(
+            diagnostics +
+            Environment.NewLine +
+            "Žádnou nalezenou cestu se nepodařilo inicializovat přes WinUSB.");
     }
 
     public int Write(byte[] data)
@@ -142,7 +209,8 @@ internal sealed class WinUsbDevice : IDisposable
         ArgumentNullException.ThrowIfNull(data);
 
         byte pipe = BulkOutPipe
-            ?? throw new InvalidOperationException("Bulk OUT endpoint nebyl nalezen.");
+            ?? throw new InvalidOperationException(
+                "Bulk OUT endpoint nebyl nalezen.");
 
         if (!WinUsb_WritePipe(
                 _winUsbHandle,
@@ -163,7 +231,8 @@ internal sealed class WinUsbDevice : IDisposable
     public byte[]? Read(uint timeoutMs)
     {
         byte pipe = BulkInPipe
-            ?? throw new InvalidOperationException("Bulk IN endpoint nebyl nalezen.");
+            ?? throw new InvalidOperationException(
+                "Bulk IN endpoint nebyl nalezen.");
 
         uint timeout = timeoutMs;
 
@@ -191,11 +260,12 @@ internal sealed class WinUsbDevice : IDisposable
         {
             int error = Marshal.GetLastWin32Error();
 
-            // ERROR_SEM_TIMEOUT
-            if (error == 121)
+            if (error == ErrorSemTimeout)
                 return null;
 
-            throw new Win32Exception(error, "WinUsb_ReadPipe selhalo.");
+            throw new Win32Exception(
+                error,
+                "WinUsb_ReadPipe selhalo.");
         }
 
         if (read == 0)
@@ -219,38 +289,46 @@ internal sealed class WinUsbDevice : IDisposable
 
     private static bool IsSoloInterfaceOne(string path)
     {
-        return path.Contains("vid_345b&pid_0002", StringComparison.OrdinalIgnoreCase)
-            && path.Contains("mi_01", StringComparison.OrdinalIgnoreCase);
+        return path.Contains(
+                   "vid_345b&pid_0002",
+                   StringComparison.OrdinalIgnoreCase)
+            && path.Contains(
+                   "mi_01",
+                   StringComparison.OrdinalIgnoreCase);
     }
 
-    private static IEnumerable<string> EnumerateCandidatePaths()
+    private static IEnumerable<DeviceCandidate> EnumerateCandidatePaths()
     {
-        var returned = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var returned = new HashSet<string>(
+            StringComparer.OrdinalIgnoreCase);
 
-        // Standard USB device interface GUID.
-        foreach (string path in EnumeratePathsForGuid(GuidDevInterfaceUsbDevice))
+        foreach (string path in EnumeratePathsForGuid(
+                     GuidDevInterfaceUsbDevice))
         {
             if (returned.Add(path))
-                yield return path;
+            {
+                yield return new DeviceCandidate(
+                    GuidDevInterfaceUsbDevice,
+                    path);
+            }
         }
 
-        // Zadig/WinUSB commonly registers a separate DeviceInterfaceGUID.
-        // Enumerate every interface class known to Windows and then filter by VID/PID/MI.
-        using RegistryKey? deviceClasses = Registry.LocalMachine.OpenSubKey(
-            @"SYSTEM\CurrentControlSet\Control\DeviceClasses");
+        using RegistryKey? deviceClasses =
+            Registry.LocalMachine.OpenSubKey(
+                @"SYSTEM\CurrentControlSet\Control\DeviceClasses");
 
         if (deviceClasses is null)
             yield break;
 
-        foreach (string subKeyName in deviceClasses.GetSubKeyNames())
+        foreach (string keyName in deviceClasses.GetSubKeyNames())
         {
-            if (!Guid.TryParse(subKeyName, out Guid interfaceGuid))
+            if (!Guid.TryParse(keyName, out Guid interfaceGuid))
                 continue;
 
             if (interfaceGuid == GuidDevInterfaceUsbDevice)
                 continue;
 
-            IEnumerable<string> paths;
+            string[] paths;
 
             try
             {
@@ -258,19 +336,23 @@ internal sealed class WinUsbDevice : IDisposable
             }
             catch (Win32Exception)
             {
-                // Some registered classes cannot be enumerated in the current context.
                 continue;
             }
 
             foreach (string path in paths)
             {
                 if (returned.Add(path))
-                    yield return path;
+                {
+                    yield return new DeviceCandidate(
+                        interfaceGuid,
+                        path);
+                }
             }
         }
     }
 
-    private static IEnumerable<string> EnumeratePathsForGuid(Guid interfaceGuid)
+    private static IEnumerable<string> EnumeratePathsForGuid(
+        Guid interfaceGuid)
     {
         Guid guid = interfaceGuid;
 
@@ -281,15 +363,7 @@ internal sealed class WinUsbDevice : IDisposable
             DigcfPresent | DigcfDeviceInterface);
 
         if (set == new IntPtr(-1))
-        {
-            int error = Marshal.GetLastWin32Error();
-
-            // Some interface classes may not currently have any devices.
-            if (error == 0)
-                yield break;
-
-            throw new Win32Exception(error, "SetupDiGetClassDevs selhalo.");
-        }
+            yield break;
 
         try
         {
@@ -297,7 +371,8 @@ internal sealed class WinUsbDevice : IDisposable
             {
                 var interfaceData = new SpDeviceInterfaceData
                 {
-                    cbSize = (uint)Marshal.SizeOf<SpDeviceInterfaceData>()
+                    cbSize =
+                        (uint)Marshal.SizeOf<SpDeviceInterfaceData>()
                 };
 
                 if (!SetupDiEnumDeviceInterfaces(
@@ -334,13 +409,15 @@ internal sealed class WinUsbDevice : IDisposable
                         "Nelze zjistit velikost device path.");
                 }
 
-                IntPtr detail = Marshal.AllocHGlobal(checked((int)required));
+                IntPtr detail =
+                    Marshal.AllocHGlobal(checked((int)required));
 
                 try
                 {
-                    // SP_DEVICE_INTERFACE_DETAIL_DATA.cbSize:
-                    // x64 = 8, x86 Unicode = 6.
-                    Marshal.WriteInt32(detail, IntPtr.Size == 8 ? 8 : 6);
+                    // cbSize je na x64 8 a na x86 Unicode 6.
+                    Marshal.WriteInt32(
+                        detail,
+                        IntPtr.Size == 8 ? 8 : 6);
 
                     if (!SetupDiGetDeviceInterfaceDetail(
                             set,
@@ -355,8 +432,12 @@ internal sealed class WinUsbDevice : IDisposable
                             "SetupDiGetDeviceInterfaceDetail selhalo.");
                     }
 
-                    int pathOffset = 4;
-                    string? path = Marshal.PtrToStringUni(detail + pathOffset);
+                    // DevicePath začíná hned za čtyřbajtovým cbSize.
+                    // Hodnota cbSize je na x64 8, ale offset řetězce je 4.
+                    const int pathOffset = 4;
+
+                    string? path = Marshal.PtrToStringUni(
+                        detail + pathOffset);
 
                     if (!string.IsNullOrWhiteSpace(path))
                         yield return path;
@@ -372,6 +453,10 @@ internal sealed class WinUsbDevice : IDisposable
             SetupDiDestroyDeviceInfoList(set);
         }
     }
+
+    private sealed record DeviceCandidate(
+        Guid InterfaceGuid,
+        string Path);
 
     internal sealed record UsbPipeInfo(
         UsbdPipeType PipeType,
@@ -419,7 +504,10 @@ internal sealed class WinUsbDevice : IDisposable
         public byte Interval;
     }
 
-    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    [DllImport(
+        "setupapi.dll",
+        SetLastError = true,
+        CharSet = CharSet.Unicode)]
     private static extern IntPtr SetupDiGetClassDevs(
         ref Guid classGuid,
         IntPtr enumerator,
@@ -435,7 +523,10 @@ internal sealed class WinUsbDevice : IDisposable
         uint memberIndex,
         ref SpDeviceInterfaceData deviceInterfaceData);
 
-    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    [DllImport(
+        "setupapi.dll",
+        SetLastError = true,
+        CharSet = CharSet.Unicode)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetupDiGetDeviceInterfaceDetail(
         IntPtr deviceInfoSet,
@@ -450,7 +541,10 @@ internal sealed class WinUsbDevice : IDisposable
     private static extern bool SetupDiDestroyDeviceInfoList(
         IntPtr deviceInfoSet);
 
-    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    [DllImport(
+        "kernel32.dll",
+        SetLastError = true,
+        CharSet = CharSet.Unicode)]
     private static extern SafeFileHandle CreateFile(
         string fileName,
         uint desiredAccess,
