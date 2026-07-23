@@ -1,0 +1,74 @@
+{
+  "C1": {
+    "name": "Verze komponenty C1",
+    "format": "version"
+  },
+  "C2": {
+    "name": "Verze komponenty C2",
+    "format": "version"
+  },
+  "C3": {
+    "name": "Verze komponenty C3",
+    "format": "version"
+  },
+  "C4": {
+    "name": "Identifikátor aplikace A",
+    "format": "auto"
+  },
+  "C5": {
+    "name": "Identifikátor zařízení / binární data",
+    "format": "auto"
+  },
+  "C6": {
+    "name": "Identifikátor aplikace B",
+    "format": "auto"
+  },
+  "C7": {
+    "name": "Identifikátor zařízení",
+    "format": "auto"
+  },
+  "C8": {
+    "name": "Jazyk a oblast",
+    "format": "auto"
+  },
+  "C9": {
+    "name": "Parametr C9",
+    "format": "uint8"
+  },
+  "CA": {
+    "name": "Parametr CA",
+    "format": "uint16-be"
+  },
+  "CB": {
+    "name": "Parametr CB",
+    "format": "uint8"
+  },
+  "CC": {
+    "name": "Parametr CC",
+    "format": "uint8"
+  },
+  "CD": {
+    "name": "Parametr CD",
+    "format": "uint8"
+  },
+  "CE": {
+    "name": "Parametr CE",
+    "format": "uint32-be"
+  },
+  "CF": {
+    "name": "Parametr CF",
+    "format": "uint32-be"
+  },
+  "D0": {
+    "name": "Parametr D0",
+    "format": "hex"
+  },
+  "DF1F": {
+    "name": "Datum terminálu",
+    "format": "bcd-date"
+  },
+  "DF20": {
+    "name": "Čas terminálu",
+    "format": "bcd-time"
+  }
+}

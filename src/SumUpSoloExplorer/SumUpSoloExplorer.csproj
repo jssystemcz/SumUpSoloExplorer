@@ -10,4 +10,10 @@
     <AssemblyName>SumUpSoloExplorer</AssemblyName>
     <RootNamespace>SumUpSoloExplorer</RootNamespace>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Update="config\*.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
 </Project>

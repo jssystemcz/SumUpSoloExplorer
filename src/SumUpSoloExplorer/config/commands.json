@@ -1,0 +1,13 @@
+{
+  "commands": [
+    {
+      "id": "device-info",
+      "name": "Načíst Device Info",
+      "frame": "02 00 16 00 01 01 C1 C2 C3 C4 C5 C6 C7 C8 C9 CA CB CC CD CE CF D0 DF 1F DF 20 93 A6 03",
+      "timeoutMs": 3000,
+      "readTimeoutMs": 100,
+      "quietPeriodMs": 500,
+      "enabled": true
+    }
+  ]
+}
