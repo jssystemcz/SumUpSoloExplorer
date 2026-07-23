@@ -11,6 +11,11 @@ internal sealed class ExplorerConfig
     public Dictionary<string, string> StatusCodes { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 }
 
+internal sealed class CommandsFile
+{
+    public List<CommandDefinition> Commands { get; set; } = [];
+}
+
 internal sealed class CommandDefinition
 {
     public string Id { get; set; } = "";
@@ -42,7 +47,7 @@ internal static class ConfigLoader
 
         var result = new ExplorerConfig
         {
-            Commands = Read<List<CommandDefinition>>("commands.json") ?? [],
+            Commands = ReadCommands(),
             Tags = Read<Dictionary<string, TagDefinition>>("tags.json")
                 ?? new(StringComparer.OrdinalIgnoreCase),
             StatusCodes = Read<Dictionary<string, string>>("statuses.json")
@@ -51,6 +56,7 @@ internal static class ConfigLoader
 
         result.Tags = new Dictionary<string, TagDefinition>(
             result.Tags, StringComparer.OrdinalIgnoreCase);
+
         result.StatusCodes = new Dictionary<string, string>(
             result.StatusCodes, StringComparer.OrdinalIgnoreCase);
 
@@ -58,21 +64,63 @@ internal static class ConfigLoader
         {
             if (string.IsNullOrWhiteSpace(command.Id))
                 throw new InvalidDataException("Každý příkaz musí mít neprázdné 'id'.");
+
             if (string.IsNullOrWhiteSpace(command.Name))
                 throw new InvalidDataException($"Příkaz '{command.Id}' nemá 'name'.");
+
             _ = command.FrameBytes;
         }
 
         return result;
     }
 
-    private static T? Read<T>(string fileName)
+    private static List<CommandDefinition> ReadCommands()
     {
-        string path = Path.Combine(ConfigDirectory, fileName);
+        string path = Path.Combine(ConfigDirectory, "commands.json");
+
         if (!File.Exists(path))
             throw new FileNotFoundException($"Chybí konfigurační soubor: {path}");
 
         string json = File.ReadAllText(path);
+
+        var options = new JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true,
+            ReadCommentHandling = JsonCommentHandling.Skip,
+            AllowTrailingCommas = true
+        };
+
+        // Nový formát:
+        // {
+        //   "commands": [ ... ]
+        // }
+        try
+        {
+            CommandsFile? wrapper = JsonSerializer.Deserialize<CommandsFile>(json, options);
+
+            if (wrapper?.Commands != null && wrapper.Commands.Count > 0)
+                return wrapper.Commands;
+        }
+        catch
+        {
+            // Zkusíme starý formát.
+        }
+
+        // Starý formát:
+        // [ ... ]
+        return JsonSerializer.Deserialize<List<CommandDefinition>>(json, options)
+               ?? [];
+    }
+
+    private static T? Read<T>(string fileName)
+    {
+        string path = Path.Combine(ConfigDirectory, fileName);
+
+        if (!File.Exists(path))
+            throw new FileNotFoundException($"Chybí konfigurační soubor: {path}");
+
+        string json = File.ReadAllText(path);
+
         return JsonSerializer.Deserialize<T>(json, new JsonSerializerOptions
         {
             PropertyNameCaseInsensitive = true,
@@ -87,6 +135,7 @@ internal static class HexCodec
     public static byte[] Parse(string text)
     {
         string compact = new(text.Where(Uri.IsHexDigit).ToArray());
+
         if (compact.Length == 0 || compact.Length % 2 != 0)
             throw new FormatException("HEX rámec musí obsahovat sudý počet číslic.");
 
