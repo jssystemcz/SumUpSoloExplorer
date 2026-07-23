@@ -355,7 +355,7 @@ internal sealed class WinUsbDevice : IDisposable
                             "SetupDiGetDeviceInterfaceDetail selhalo.");
                     }
 
-                    int pathOffset = IntPtr.Size == 8 ? 8 : 4;
+                    int pathOffset = 4;
                     string? path = Marshal.PtrToStringUni(detail + pathOffset);
 
                     if (!string.IsNullOrWhiteSpace(path))
