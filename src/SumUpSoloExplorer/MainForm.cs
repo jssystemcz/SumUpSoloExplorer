@@ -32,7 +32,7 @@ internal sealed class MainForm : Form
 
     private readonly Button _connect = new() { Text = "Připojit", AutoSize = true };
     private readonly Button _disconnect = new() { Text = "Odpojit", AutoSize = true, Enabled = false };
-    private readonly Button _deviceInfoButton = new() { Text = "Get Device Info", AutoSize = true, Enabled = false };
+    private readonly Button _deviceInfoButton = new() { Text = "Načíst Device Info", AutoSize = true, Enabled = false };
     private readonly Button _clear = new() { Text = "Vymazat log", AutoSize = true };
 
     private WinUsbDevice? _device;
@@ -67,10 +67,10 @@ internal sealed class MainForm : Form
         {
             Dock = DockStyle.Fill,
             Orientation = Orientation.Horizontal,
-            SplitterDistance = 180
+            SplitterDistance = 260
         };
 
-        var infoGroup = new GroupBox { Text = "USB zařízení", Dock = DockStyle.Fill, Padding = new Padding(8) };
+        var infoGroup = new GroupBox { Text = "Informace o terminálu", Dock = DockStyle.Fill, Padding = new Padding(8) };
         infoGroup.Controls.Add(_deviceInfo);
 
         var logGroup = new GroupBox { Text = "Komunikační log", Dock = DockStyle.Fill, Padding = new Padding(8) };
@@ -93,7 +93,7 @@ internal sealed class MainForm : Form
     private void Connect()
     {
         Disconnect();
-        Append("Hledám USB\\\\VID_345B&PID_0002&MI_01 ...");
+        Append("Hledám USB\\VID_345B&PID_0002&MI_01 ...");
 
         try
         {
@@ -108,11 +108,9 @@ internal sealed class MainForm : Form
             sb.AppendLine("Zařízení bylo otevřeno přes WinUSB.");
             sb.AppendLine($"Cesta: {_device.DevicePath}");
             sb.AppendLine($"Interface: {_device.InterfaceNumber}");
-            sb.AppendLine($"Endpointy:");
+            sb.AppendLine("Endpointy:");
             foreach (var pipe in _device.Pipes)
-            {
                 sb.AppendLine($"  0x{pipe.PipeId:X2}  {pipe.PipeType}  MaxPacket={pipe.MaximumPacketSize}");
-            }
 
             sb.AppendLine();
             sb.AppendLine($"Bulk OUT: {FormatPipe(_device.BulkOutPipe)}");
@@ -154,19 +152,30 @@ internal sealed class MainForm : Form
 
             DateTime until = DateTime.UtcNow.AddSeconds(15);
             bool gotData = false;
+            bool parsed = false;
 
             while (DateTime.UtcNow < until)
             {
                 byte[]? received = await Task.Run(() => _device.Read(1000));
-                if (received is { Length: > 0 })
+                if (received is not { Length: > 0 })
+                    continue;
+
+                gotData = true;
+                Append($"RX ({received.Length} B): {Hex(received)}");
+
+                if (DeviceInfoParser.TryFormat(received, out string formatted))
                 {
-                    gotData = true;
-                    Append($"RX ({received.Length} B): {Hex(received)}");
+                    _deviceInfo.Text = formatted;
+                    parsed = true;
+                    Append("Device Info bylo rozparsováno do čitelné podoby.");
+                    break;
                 }
             }
 
             if (!gotData)
                 Append("RX timeout: nepřišla žádná data.");
+            else if (!parsed)
+                Append("Přišla data, ale žádný rámec Device Info se nepodařilo rozparsovat.");
         }
         catch (TimeoutException)
         {
